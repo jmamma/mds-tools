@@ -502,3 +502,29 @@ index 00000000..c5640dd9
 +		uint32_t m_lastStall = 0;
 +	};
 +}
+--- a/source/dsp56kEmu/dsp_ops.inl
++++ b/source/dsp56kEmu/dsp_ops.inl
+@@ -9,7 +9,22 @@
+ 
+ 	inline void DSP::op_Bchg_ea(const TWord op)
+ 	{
+-		errNotImplemented("BCHG");
++		const TWord bit		= getBit<Bchg_ea>(op);
++		const EMemArea S	= getFieldValueMemArea<Bchg_ea>(op);
++		const TWord ea		= effectiveAddress<Bchg_ea>(op);
++
++		if(isPeripheralAddress(ea))
++		{
++			auto val = memReadPeriph( S, ea, Bchg_ea );
++			sr_toggle( CCR_C, bittestandchange( val, bit ) );
++			memWritePeriph( S, ea, val );
++		}
++		else
++		{
++			auto val = memRead( S, ea );
++			sr_toggle( CCR_C, bittestandchange( val, bit ) );
++			memWrite( S, ea, val );
++		}
+ 	}
+ 	inline void DSP::op_Bchg_aa(const TWord op)
+ 	{

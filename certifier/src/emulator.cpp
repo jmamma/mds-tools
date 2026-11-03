@@ -56,7 +56,7 @@ bool restricted(Instruction instruction) {
 
 bool unsupported(Instruction instruction) {
     switch (instruction) {
-    case dsp56k::Bchg_ea: case dsp56k::BRKcc: case dsp56k::DoForever: case dsp56k::DorForever:
+    case dsp56k::BRKcc: case dsp56k::DoForever: case dsp56k::DorForever:
     case dsp56k::Lra_Rn: case dsp56k::Norm: case dsp56k::Rep_ea: case dsp56k::Rep_aa:
     case dsp56k::ADC: case dsp56k::Extract_S1S2: case dsp56k::Extract_CoS2: case dsp56k::Merge:
     case dsp56k::Mpyr_SD: case dsp56k::Mpyri: case dsp56k::Ror: case dsp56k::Sbc: case dsp56k::Vsl:

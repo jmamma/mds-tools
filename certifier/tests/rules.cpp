@@ -127,6 +127,76 @@ void memory_permissions() {
     require(!read_memory(mds::kDescriptorWord, true, p, 0, true), "neighbour descriptor outside RENDER accepted");
 }
 
+// BCHG with a memory operand: encodings 0000101101MMMRRR0S0bbbbb (BCHG) and
+// 0000101001MMMRRR0S1bbbbb (BSET), through (R0) and through an absolute address.
+std::vector<uint32_t> bit_program(uint32_t base_opcode, uint32_t address, bool y, bool absolute) {
+    const uint32_t area = y ? 0x40u : 0u;
+    if (absolute) return {base_opcode | 0x7000u | area | 3u, address, 0x00000cu};
+    return {0x60f400u, address, base_opcode | 0x6000u | area | 3u, 0x00000cu};
+}
+
+struct BitResult {
+    bool ok = false;
+    uint32_t value = 0, carry = 0;
+    mds::Costs costs;
+    std::string error;
+};
+
+BitResult run_bit_program(const std::vector<uint32_t>& program, uint32_t address, bool y, uint32_t start) {
+    mds::Package package;
+    package.program = program;
+    package.relocated.resize(program.size(), false);
+    Services services;
+    mds::Emulator emulator;
+    emulator.install(package, 0x200, services);
+    emulator.begin_track();
+    const auto area = y ? dsp56k::MemArea_Y : dsp56k::MemArea_X;
+    emulator.set(area, address, start);
+    mds::Permissions permissions;
+    permissions.routine = mds::Routine::Init;
+    permissions.track = 3;
+    permissions.x_words = permissions.y_words = 4;
+    BitResult result;
+    result.ok = emulator.call(0x200, permissions, result.costs, result.error);
+    result.value = emulator.get(area, address);
+    result.carry = emulator.reg(dsp56k::Reg_SR) & 1u;
+    return result;
+}
+
+void bit_change_memory() {
+    const uint32_t own = mds::workset(3) + 1;
+    for (bool y : {false, true}) {
+        for (bool absolute : {false, true}) {
+            const auto bchg = bit_program(0x0b0000u, own, y, absolute);
+            // Bit 3 clear: it becomes set, the other bits stay, and C holds the old bit.
+            auto result = run_bit_program(bchg, own, y, 0x123450u);
+            require(result.ok, "BCHG on own memory rejected: " + result.error);
+            require(result.value == 0x123458u, "BCHG did not set the bit");
+            require(result.carry == 0u, "BCHG reported the wrong old bit (clear)");
+            // Bit 3 set: it becomes clear.
+            result = run_bit_program(bchg, own, y, 0x123458u);
+            require(result.ok, "BCHG on own memory rejected: " + result.error);
+            require(result.value == 0x123450u, "BCHG did not clear the bit");
+            require(result.carry == 1u, "BCHG reported the wrong old bit (set)");
+            // The manual gives BCHG and BSET the same timing, for the same operand.
+            const auto bset = bit_program(0x0a0020u, own, y, absolute);
+            const auto reference = run_bit_program(bset, own, y, 0x123450u);
+            require(reference.ok, "BSET on own memory rejected: " + reference.error);
+            const auto measured = run_bit_program(bchg, own, y, 0x123450u);
+            require(measured.costs.nominal == reference.costs.nominal &&
+                        measured.costs.instructions == reference.costs.instructions,
+                    "BCHG costs differently from BSET");
+            // The same memory rules apply: not another track's workset, not a peripheral.
+            const uint32_t other = mds::workset(2);
+            result = run_bit_program(bit_program(0x0b0000u, other, y, absolute), other, y, 0u);
+            require(!result.ok, "BCHG on another track's workset accepted");
+        }
+        std::string error;
+        require(!run(bit_program(0x0b0000u, 0xffff90u, y, true), error), "BCHG on a peripheral accepted");
+        require(error.find("forbids") != std::string::npos, error);
+    }
+}
+
 void service_hardware() {
     using namespace dsp56k;
     for (mds::Hardware hardware : {mds::Hardware::NonUW, mds::Hardware::Mk1UW, mds::Hardware::Mk2UW}) {
@@ -185,6 +255,7 @@ int main() {
     try {
         loop_reads();
         register_writes();
+        bit_change_memory();
         tempo_values();
         memory_permissions();
         service_hardware();
