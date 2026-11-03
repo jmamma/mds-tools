@@ -1,0 +1,504 @@
+diff --git a/source/dsp56kEmu/dsp.cpp b/source/dsp56kEmu/dsp.cpp
+--- a/source/dsp56kEmu/dsp.cpp
++++ b/source/dsp56kEmu/dsp.cpp
+@@ -546,13 +546,17 @@
+ 	bool DSP::rep_exec(const TWord _loopCount)
+ 	{
+ 		const auto lcBackup = reg.lc;
+-		reg.lc.var = _loopCount;
++		reg.lc.var = _loopCount ? _loopCount : 65536;
+ 
+ 		++m_instructions;
+ 
+ 		traceOp();
+ 
+ 		pcCurrentInstruction = reg.pc.var;
++#if DSP56300_DEBUGGER
++		if(m_debugger)
++			m_debugger->onExec(pcCurrentInstruction);
++#endif
+ 		const auto op = fetchPC();
+ 
+ 		--reg.lc.var;
+@@ -564,6 +568,10 @@
+ 
+ 		while( reg.lc.var > 0 )
+ 		{
++#if DSP56300_DEBUGGER
++			if(m_debugger)
++				m_debugger->onExec(pcCurrentInstruction);
++#endif
+ 			--reg.lc.var;
+ 			(this->*func)(op);
+ 			++m_instructions;
+diff --git a/source/dsp56kEmu/dsp_ops.inl b/source/dsp56kEmu/dsp_ops.inl
+--- a/source/dsp56kEmu/dsp_ops.inl
++++ b/source/dsp56kEmu/dsp_ops.inl
+@@ -391,7 +391,16 @@
+ 	}
+ 	inline void DSP::op_Normf(const TWord op)
+ 	{
+-		errNotImplemented("NORMF");
++		const auto sss = getFieldValue<Normf, Field_sss>(op);
++		const bool ab = getFieldValue<Normf, Field_D>(op);
++		const auto shift = signextend<int32_t, 24>(
++			decode_sss_read<TWord>(sss));
++		const auto carry = sr_test_noCache(CCR_C);
++		if(shift >= 0)
++			alu_asr(ab, ab, shift);
++		else
++			alu_asl(ab, ab, -shift);
++		sr_toggle(CCR_C, carry != 0);
+ 	}
+ 
+ 	inline void DSP::op_Pflush(const TWord op)
+diff --git a/source/dsp56kEmu/dsp_ops_alu.inl b/source/dsp56kEmu/dsp_ops_alu.inl
+--- a/source/dsp56kEmu/dsp_ops_alu.inl
++++ b/source/dsp56kEmu/dsp_ops_alu.inl
+@@ -691,7 +691,37 @@
+ 	}
+ 	inline void DSP::op_Clb(const TWord op)
+ 	{
+-		errNotImplemented("CLB");
++		const auto S = getFieldValue<Clb, Field_S>(op);
++		const auto D = getFieldValue<Clb, Field_D>(op);
++		const TReg56& s = S ? reg.b : reg.a;
++		TReg56& d = D ? reg.b : reg.a;
++		int count;
++		if(s.var == 0)
++		{
++			count = 0;
++		}
++		else
++		{
++			const auto shifted = static_cast<int64_t>(s.var << 8);
++			auto value = static_cast<uint64_t>(
++				shifted < 0 ? ~shifted : shifted);
++			value |= 0xff;
++			int highest = 0;
++			for(int bit = 63; bit >= 0; --bit)
++			{
++				if(value & (static_cast<uint64_t>(1) << bit))
++				{
++					highest = bit;
++					break;
++				}
++			}
++			count = highest - (64 - 9 - 1);
++		}
++		d.var = (static_cast<TInt64>(count) << 24) &
++			0x00ffffffffffffff;
++		sr_toggle(CCR_N, bittest(d, 47));
++		sr_toggle(CCR_Z, count == 0);
++		sr_clear(CCR_V);
+ 	}
+ 	inline void DSP::op_Clr(const TWord op)
+ 	{
+@@ -730,7 +760,43 @@
+ 	}
+ 	inline void DSP::op_Cmpu_S1S2(const TWord op)
+ 	{
+-		errNotImplemented("CMPU");
++		updateDirtyCCR();
++		const bool D = getFieldValue<Cmpu_S1S2, Field_d>(op);
++		const TWord ggg = getFieldValue<Cmpu_S1S2, Field_ggg>(op);
++		constexpr uint64_t mask48 = 0x0000ffffffffffffull;
++		const uint64_t destination =
++			static_cast<uint64_t>((D ? reg.b : reg.a).var) & mask48;
++		uint64_t source = 0;
++		switch(ggg)
++		{
++		case 0:
++			source = static_cast<uint64_t>((D ? reg.a : reg.b).var) & mask48;
++			break;
++		case 4:
++			source =
++				(static_cast<uint64_t>(x0().var) & 0x00ffffffu) << 24;
++			break;
++		case 5:
++			source =
++				(static_cast<uint64_t>(y0().var) & 0x00ffffffu) << 24;
++			break;
++		case 6:
++			source =
++				(static_cast<uint64_t>(x1().var) & 0x00ffffffu) << 24;
++			break;
++		case 7:
++			source =
++				(static_cast<uint64_t>(y1().var) & 0x00ffffffu) << 24;
++			break;
++		default:
++			errNotImplemented("CMPU source encoding");
++			return;
++		}
++		const uint64_t result = (destination - source) & mask48;
++		sr_toggle(CCR_Z, result == 0);
++		sr_toggle(CCR_N, (result & (uint64_t{1} << 47)) != 0);
++		sr_clear(CCR_V);
++		sr_toggle(CCR_C, destination < source);
+ 	}
+ 	inline void DSP::op_Dec(const TWord op)
+ 	{
+@@ -806,11 +872,15 @@
+ 	}
+ 	inline void DSP::op_Eor_xx(const TWord op)
+ 	{
+-		errNotImplemented("EOR");		
++		const auto ab = getFieldValue<Eor_xx,Field_d>(op);
++		const TWord immediate = getFieldValue<Eor_xx,Field_iiiiii>(op);
++		alu_eor(ab, immediate);
+ 	}
+ 	inline void DSP::op_Eor_xxxx(const TWord op)
+ 	{
+-		errNotImplemented("EOR");
++		const auto ab = getFieldValue<Eor_xxxx,Field_d>(op);
++		const TWord immediate = immediateDataExt<Eor_xxxx>();
++		alu_eor(ab, immediate);
+ 	}
+ 	inline void DSP::op_Extract_S1S2(const TWord op)
+ 	{
+@@ -976,7 +1046,12 @@
+ 	}
+ 	inline void DSP::op_Maci_xxxx(const TWord op)
+ 	{
+-		errNotImplemented("MACI");
++		const bool ab = getFieldValue<Maci_xxxx,Field_d>(op);
++		const bool negate = getFieldValue<Maci_xxxx,Field_k>(op);
++		const TWord qq = getFieldValue<Maci_xxxx,Field_qq>(op);
++		const TReg24 immediate = TReg24(immediateDataExt<Maci_xxxx>());
++		const TReg24 source = decode_qq_read(qq);
++		alu_mpy(ab, source, immediate, negate, true);
+ 	}
+ 	inline void DSP::op_Macsu(const TWord op)
+ 	{
+@@ -1009,7 +1084,13 @@
+ 	}
+ 	inline void DSP::op_Macri_xxxx(const TWord op)
+ 	{
+-		errNotImplemented("MACRI");		
++		const bool ab = getFieldValue<Macri_xxxx,Field_d>(op);
++		const bool negate = getFieldValue<Macri_xxxx,Field_k>(op);
++		const TWord qq = getFieldValue<Macri_xxxx,Field_qq>(op);
++		const TReg24 immediate = TReg24(immediateDataExt<Macri_xxxx>());
++		const TReg24 source = decode_qq_read(qq);
++		alu_mpy(ab, source, immediate, negate, true);
++		alu_rnd(ab);
+ 	}
+ 	inline void DSP::op_Max(const TWord op)
+ 	{
+diff --git a/source/dsp56kEmu/dspconfig.h b/source/dsp56kEmu/dspconfig.h
+--- a/source/dsp56kEmu/dspconfig.h
++++ b/source/dsp56kEmu/dspconfig.h
+@@ -10,9 +10,5 @@
+ 	constexpr bool g_useAARTranslate = false;
+ #endif
+ 
+-#if defined(HAVE_X86_64) || defined(HAVE_ARM64)
+-	constexpr bool g_jitSupported = true;
+-#else
+ 	constexpr bool g_jitSupported = false;
+-#endif
+ }
+--- a/source/dsp56kEmu/dsp.cpp
++++ b/source/dsp56kEmu/dsp.cpp
+@@ -1015,6 +1015,10 @@
+ 
+ 	bool DSP::memWritePeriph( EMemArea _area, TWord _offset, TWord _value )
+ 	{
++#if DSP56300_DEBUGGER
++        if(m_debugger && m_debugger->onPeripheralAccess(_area, _offset | 0xff0000, true))
++            return false;
++#endif
+ 		perif[_area - MemArea_X]->write(_offset | 0xff0000, _value );
+ 		return true;
+ 	}
+@@ -1075,6 +1079,10 @@
+ 
+ 	TWord DSP::memReadPeriph(EMemArea _area, TWord _offset, Instruction _inst) const
+ 	{
++#if DSP56300_DEBUGGER
++        if(m_debugger && m_debugger->onPeripheralAccess(_area, _offset | 0xff0000, false))
++            return 0;
++#endif
+ 		return perif[_area - MemArea_X]->read(_offset | 0xff0000, _inst);
+ 	}
+ 	TWord DSP::memReadPeriphFFFF80(EMemArea _area, TWord _offset, Instruction _inst) const
+--- a/source/dsp56kEmu/debuggerinterface.h
++++ b/source/dsp56kEmu/debuggerinterface.h
+@@ -31,6 +31,7 @@
+ 		virtual void onExec(TWord _addr) {}
+ 		virtual void onMemoryWrite(EMemArea _area, TWord _addr, TWord _value) {}
+ 		virtual void onMemoryRead(EMemArea _area, TWord _addr) {}
++		virtual bool onPeripheralAccess(EMemArea, TWord, bool) { return false; }
+ 		virtual void onDebug() {}
+ 
+ 	private:
+diff --git a/source/dsp56kEmu/opcodecycles.cpp b/source/dsp56kEmu/opcodecycles.cpp
+index c65d9ca4..f2d388fa 100644
+--- a/source/dsp56kEmu/opcodecycles.cpp
++++ b/source/dsp56kEmu/opcodecycles.cpp
+@@ -33,6 +33,11 @@ namespace dsp56k
+ 
+ 		auto c = std::max(cycles.cycles, 1u);
+ 
++		// Short-absolute X and Y moves take one clock, loads and stores
++		// (measured on a DSP56303: EFM-CB's sample loop).
++		if(_inst == Movex_aa || _inst == Movey_aa)
++			c = 1;
++
+ 		if(cycles.pru || cycles.lab || cycles.lim)
+ 		{
+ 			// pru: Pre-update specifies clock cycles added for using the pre-update addressing modes (pre-decrement and offset by N addressing modes)
+@@ -57,8 +62,12 @@ namespace dsp56k
+ 				c += cycles.pru;
+ 				break;
+ 			case MMM_AbsAddr:
+-				c += cycles.lab;
+-				c += cycles.lim;
++				// MMMRRR 110000 is a long absolute address (+lab), 110100 long
++				// immediate data (+lim); an instruction takes one or the other.
++				if(hasField(_inst, Field_RRR) && getFieldValue(_inst, Field_RRR, _op) == (MMMRRR_ImmediateData & 7))
++					c += cycles.lim;
++				else
++					c += cycles.lab;
+ 				break;
+ 			default:
+ 				break;
+diff --git a/source/dsp56kEmu/pipelinetiming.h b/source/dsp56kEmu/pipelinetiming.h
+new file mode 100644
+index 00000000..c5640dd9
+--- /dev/null
++++ b/source/dsp56kEmu/pipelinetiming.h
+@@ -0,0 +1,232 @@
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++
++#include "opcodeanalysis.h"
++#include "opcodecycles.h"
++
++namespace dsp56k
++{
++	// Interlocks the DSP56300 core inserts between instructions, which
++	// calcCycles() leaves out (DSP56300FM Rev. 5, A.2.3 and A.2.4):
++	//   - arithmetic stall: an accumulator written by a data ALU operation
++	//     and read by the next instruction's move: one clock, also after a
++	//     two-word writer (measured: add #>xx,a; move a1,r5 takes 4);
++	//   - transfer stall: an accumulator written by a move and read by the
++	//     next instruction's move: one clock (measured: move x:(r5),a;
++	//     move a1,x:(r3)+ takes 3);
++	//   - address generation interlock: Ri, Ni or Mi written by a move and Ri
++	//     used for addressing within the next three clocks: three, two or one
++	//     clock, counting the clocks of the instructions in between (external
++	//     wait states hold the whole pipeline and are not counted);
++	//   - a DO loop whose body is one word: one clock more per DO (measured:
++	//     do #8,L / nop / L: takes 14). Needs the DO's extension word.
++	// Feed every executed instruction to execute() in program order; the
++	// result is calcCycles() plus the stall the instruction takes.
++	class PipelineTiming
++	{
++	public:
++		// _opB: the instruction's second word, for DO loops; without it a
++		// one-word DO body is not charged its extra clock.
++		uint32_t execute(const Instruction _instA, const Instruction _instB, const TWord _pc, const TWord _op, const TWord _opB)
++		{
++			return execute(_instA, _instB, _pc, _op) + (oneWordLoop(_instA, _pc, _opB) ? 1 : 0);
++		}
++
++		uint32_t execute(const Instruction _instA, const Instruction _instB, const TWord _pc, const TWord _op)
++		{
++			const uint32_t base = calcCycles(_instA, _instB, _pc, _op, 0, 0);
++
++			Instruction alu = Invalid;
++			Instruction move = Invalid;
++			if(_instB != Invalid)
++			{
++				alu = _instA;
++				move = _instB;
++			}
++			else if(isMove(_instA))
++			{
++				move = _instA;
++			}
++			else
++			{
++				alu = _instA;
++			}
++
++			uint64_t aluWritten = 0;
++			if(alu != Invalid)
++			{
++				RegisterMask written, read;
++				getRegisters(written, read, alu, _op);
++				aluWritten = static_cast<uint64_t>(written) & accumulators();
++			}
++
++			uint64_t moveRead = 0;
++			uint64_t moveWritten = 0;
++			uint32_t moveWrittenSets = 0;
++			if(move != Invalid)
++			{
++				RegisterMask written, read;
++				getRegisters(written, read, move, _op);
++				moveRead = static_cast<uint64_t>(read) & accumulators();
++				moveWritten = static_cast<uint64_t>(written) & accumulators();
++				moveWrittenSets = registerSets(static_cast<uint64_t>(written)) & ~updatedByAddressing(move, _op);
++			}
++
++			const uint32_t addressing = addressRegisters(alu, _op) | addressRegisters(move, _op);
++
++			uint32_t stall = ((m_aluWritten | m_moveWritten) & moveRead) ? 1 : 0;
++
++			uint32_t distance = 0;
++			for(uint32_t i = 0; i < m_count && distance < 3; ++i)
++			{
++				const auto& previous = m_history[i];
++				if(previous.writtenSets & addressing)
++					stall = std::max(stall, 3 - distance);
++				distance += previous.clocks;
++			}
++
++			m_history[2] = m_history[1];
++			m_history[1] = m_history[0];
++			m_history[0] = Retired{moveWrittenSets, base + stall};
++			m_count = std::min(m_count + 1, 3u);
++			m_aluWritten = aluWritten;
++			m_moveWritten = moveWritten;
++			m_lastStall = stall;
++
++			return base + stall;
++		}
++
++		void reset()
++		{
++			*this = PipelineTiming();
++		}
++
++		// The interlock clocks included in the last execute() result.
++		uint32_t lastStall() const
++		{
++			return m_lastStall;
++		}
++
++	private:
++		// Whether a DO/DOR loops over just the word after it: its loop
++		// address (DO: absolute, DOR: relative to the DO) is the DO's
++		// address plus two.
++		static bool oneWordLoop(const Instruction _inst, const TWord _pc, const TWord _opB)
++		{
++			switch(_inst)
++			{
++			case Do_ea: case Do_aa: case Do_xxx: case Do_S: case DoForever:
++				return (_opB & 0xffffff) == ((_pc + 2) & 0xffffff);
++			case Dor_ea: case Dor_aa: case Dor_xxx: case Dor_S: case DorForever:
++				return (_opB & 0xffffff) == 2;
++			default:
++				return false;
++			}
++		}
++
++		struct Retired
++		{
++			uint32_t writtenSets = 0;	// bit i: Ri, Ni or Mi written by the move
++			uint32_t clocks = 0;
++		};
++
++		static constexpr uint64_t accumulators()
++		{
++			return static_cast<uint64_t>(RegisterMask::A) | static_cast<uint64_t>(RegisterMask::B);
++		}
++
++		// Bit i set if Ri, Ni or Mi is in the mask.
++		static uint32_t registerSets(const uint64_t _mask)
++		{
++			static_assert(static_cast<uint64_t>(Register::R7) - static_cast<uint64_t>(Register::R0) == 7);
++			static_assert(static_cast<uint64_t>(Register::N7) - static_cast<uint64_t>(Register::N0) == 7);
++			static_assert(static_cast<uint64_t>(Register::M7) - static_cast<uint64_t>(Register::M0) == 7);
++			return static_cast<uint32_t>(((_mask >> static_cast<uint64_t>(Register::R0)) |
++			                             (_mask >> static_cast<uint64_t>(Register::N0)) |
++			                             (_mask >> static_cast<uint64_t>(Register::M0))) & 0xffu);
++		}
++
++		static uint32_t modeRegister(const Instruction _inst, const TWord _op, bool& _updates)
++		{
++			_updates = false;
++			const bool mmm3 = hasField(_inst, Field_MMM);
++			const auto mmm = getFieldValue(_inst, mmm3 ? Field_MMM : Field_MM, _op);
++			if(mmm3 && mmm == MMM_AbsAddr)
++				return 0;
++			_updates = mmm != MMM_Rn && mmm != MMM_RnPlusNnNoUpdate;
++			return 1u << getFieldValue(_inst, Field_RRR, _op);
++		}
++
++		// Address registers the instruction uses to form an address.
++		static uint32_t addressRegisters(const Instruction _inst, const TWord _op)
++		{
++			if(_inst == Invalid)
++				return 0;
++			uint32_t sets = 0;
++			bool updates;
++			if(hasField(_inst, Field_MM) || hasField(_inst, Field_MMM))
++				sets |= modeRegister(_inst, _op, updates);
++			else if(hasField(_inst, Field_RRR))
++				sets |= 1u << getFieldValue(_inst, Field_RRR, _op);
++			if(hasField(_inst, Field_mm))
++				sets |= 1u << movexyRegister(_inst, _op);
++			return sets;
++		}
++
++		// Address registers the instruction's own addressing mode updates;
++		// the AGU forwards those, so they are not move destinations.
++		static uint32_t updatedByAddressing(const Instruction _inst, const TWord _op)
++		{
++			uint32_t sets = 0;
++			bool updates;
++			if(hasField(_inst, Field_MM) || hasField(_inst, Field_MMM))
++			{
++				const auto r = modeRegister(_inst, _op, updates);
++				if(updates)
++					sets |= r;
++			}
++			if(hasField(_inst, Field_mm))
++			{
++				const auto mm = getFieldValue(_inst, Field_mm, _op);
++				if(mm != MMM_Rn && mm != MMM_RnPlusNnNoUpdate)
++					sets |= 1u << movexyRegister(_inst, _op);
++			}
++			return sets;
++		}
++
++		// The Y address register of an XY move: R4-R7 when X uses R0-R3.
++		static uint32_t movexyRegister(const Instruction _inst, const TWord _op)
++		{
++			const auto rrX = getFieldValue(_inst, Field_RRR, _op);
++			const auto rrY = getFieldValue(_inst, Field_rr, _op);
++			return (rrY + (rrX >= 4 ? 0 : 4)) & 7;
++		}
++
++		static bool isMove(const Instruction _inst)
++		{
++			switch(_inst)
++			{
++			case Lua_ea: case Lua_Rn:
++			case Move_Nop: case Move_xx: case Mover: case Move_ea:
++			case Movex_ea: case Movex_aa: case Movex_Rnxxxx: case Movex_Rnxxx: case Movexr_ea: case Movexr_A:
++			case Movey_ea: case Movey_aa: case Movey_Rnxxxx: case Movey_Rnxxx: case Moveyr_ea: case Moveyr_A:
++			case Movel_ea: case Movel_aa: case Movexy:
++			case Movec_ea: case Movec_aa: case Movec_S1D2: case Movec_xx:
++			case Movem_ea: case Movem_aa:
++			case Movep_ppea: case Movep_Xqqea: case Movep_Yqqea: case Movep_eapp: case Movep_eaqq:
++			case Movep_Spp: case Movep_SXqq: case Movep_SYqq:
++				return true;
++			default:
++				return false;
++			}
++		}
++
++		Retired m_history[3];
++		uint32_t m_count = 0;
++		uint64_t m_aluWritten = 0;
++		uint64_t m_moveWritten = 0;
++		uint32_t m_lastStall = 0;
++	};
++}

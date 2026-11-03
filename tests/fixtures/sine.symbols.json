@@ -1,0 +1,7 @@
+{
+  "INIT": 0,
+  "TRIG": 7,
+  "RENDER": 11,
+  "MDS_SINE_BLOCK_LOOP": 25,
+  "MDS_SINE_TABLE_READ": 33
+}
